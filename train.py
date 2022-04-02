@@ -18,7 +18,7 @@ logging.getLogger().setLevel(logging.ERROR)
 import wandb
 
 
-wandb.init(project='my-project', name='exp040202')
+wandb.init(project='my-project', name='exp040203')
 wandb.watch_called = False
 config = wandb.config
 config.batch_size = 16
@@ -38,6 +38,10 @@ def concate_title(example):
     example['title_anchor'] = example['title'] + ' ' + example['anchor']
     return example
 
+def concate_title_v2(example):
+    example['title_anchor'] = example['title'] + '[SEP]' + example['anchor']
+    return example
+
 label_score_mapping = {0: 0, 1:0.25, 2:0.5, 3:0.75, 4:1.}
 
 def compute_metrics(preds, labels):
@@ -50,6 +54,27 @@ def compute_metrics(preds, labels):
     r = pearsonr(preds_scores, labels_scores)[0]
     acc = accuracy_score(labels, preds)
     return {'pearson correlation':r, 'label accuracy': acc}
+
+def get_valid_result_v2(model, dataloader):
+    model.eval()
+    device = model.device
+    preds = np.array([])
+    labels = np.array([])
+    loss = 0
+    for batch in dataloader:
+        inputs = {k:v.to(device) for k,v in batch.items()}
+        with torch.no_grad():
+            outputs = model(**inputs)
+        logits = outputs.logits
+        loss += outputs.loss.item()
+        # pred_labels = torch.argmax(logits, dim=1).cpu().numpy()
+        preds = np.append(preds, logits.flatten().cpu().numpy())
+        labels = np.append(labels, batch['labels'].cpu().numpy())
+    pear_score = pearsonr(preds, labels)[0]
+    avg_loss = loss / len(dataloader)
+    # metrics = compute_metrics(preds, labels)
+    return {'pearsonr correlation': pear_score, 'loss': avg_loss}
+    
 
 def get_valid_result(model, dataloader):
     model.eval()
@@ -80,15 +105,17 @@ if __name__ == '__main__':
     # valid_ds, test_ds = ds_dict['train'], ds_dict['test']
     total_ds_dict = DatasetDict.load_from_disk('/data/gehl/data/playground/us-patent-phrase-dataset.json')
     train_ds, valid_ds, test_ds = total_ds_dict['train'], total_ds_dict['valid'], total_ds_dict['test']
+    train_ds.map(concate_title_v2)
+    valid_ds.map(concate_title_v2)
 
     tokenizer = AutoTokenizer.from_pretrained('anferico/bert-for-patents')
     tokenized_train_ds = train_ds.map(tokenize_function, batched=True)
     tokenized_valid_ds = valid_ds.map(tokenize_function, batched=True)
-    tokenized_train_ds.rename_column_('class', 'labels')
-    tokenized_valid_ds.rename_column_('class', 'labels')
+    tokenized_train_ds.rename_column_('score', 'labels')
+    tokenized_valid_ds.rename_column_('score', 'labels')
     # tokenized_train_ds.column_names
-    tokenized_train_ds.remove_columns_(['anchor', 'code', 'id','score', 'target', 'title', 'title_anchor'])
-    tokenized_valid_ds.remove_columns_(['anchor', 'code', 'id','score', 'target', 'title', 'title_anchor'])
+    tokenized_train_ds.remove_columns_(['anchor', 'code', 'id', 'target', 'title', 'title_anchor', 'class'])
+    tokenized_valid_ds.remove_columns_(['anchor', 'code', 'id', 'target', 'title', 'title_anchor', 'class'])
     # tokenized_train_ds.column_names
 
     data_collator = DataCollatorWithPadding(tokenizer=tokenizer, padding=True)
@@ -100,7 +127,7 @@ if __name__ == '__main__':
     valid_dataloader = DataLoader(tokenized_valid_ds, batch_size=config.batch_size, collate_fn=data_collator)
     print('dataloader generated successfully')
 
-    model = AutoModelForSequenceClassification.from_pretrained('anferico/bert-for-patents', num_labels=5)
+    model = AutoModelForSequenceClassification.from_pretrained('anferico/bert-for-patents', num_labels=1)
     
     device = torch.device('cuda')
     optimizer = AdamW(params=model.parameters(), lr=config.lr)
@@ -129,8 +156,8 @@ if __name__ == '__main__':
                 wandb.log({'train loss': loss.item()})
             step += 1
             if step % config.eval_steps == 0:
-                valid_metrics = get_valid_result(model, valid_dataloader)
-                wandb.log({'valid pearsonr': valid_metrics['pearson correlation'],
-                        'valid acc': valid_metrics['label accuracy']})
+                valid_metrics = get_valid_result_v2(model, valid_dataloader)
+                wandb.log({'valid pearsonr': valid_metrics['pearsonr correlation'],
+                        'valid loss': valid_metrics['loss']})
                 # print('valid metrics : {}'.format(valid_metrics))
-    torch.save(model.state_dict(), '/data/gehl/data/playground/models/ussp_exp040202.pth')
+    torch.save(model.state_dict(), '/data/gehl/data/playground/models/ussp_exp040203.pth')
