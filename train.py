@@ -16,21 +16,24 @@ from transformers import get_scheduler
 import logging
 logging.propagate = False
 logging.getLogger().setLevel(logging.ERROR)
+from attack_train_model import FGM
 import wandb
 import copy
 
 
-wandb.init(project='my-project', name='exp040301')
+wandb.init(project='my-project', name='exp040501')
 wandb.watch_called = False
 config = wandb.config
 config.batch_size = 16
 config.valid_batch_size = 8
-config.epochs = 7
+config.epochs = 5
 config.lr = 2e-5
+config.max_grad_norm = 1.0
 config.classifier_lr = 2e-5
 config.seed = 200
 config.log_interval = 10
 config.eval_steps = 100
+config.model_name = 'usspm040501.pth'
 
 data_dir = '/data/gehl/data/playground'
 
@@ -184,6 +187,7 @@ if __name__ == '__main__':
     print('dataloader generated successfully')
 
     model = AutoModelForSequenceClassification.from_pretrained('anferico/bert-for-patents', num_labels=1)
+    fgm = FGM(model)
     
     device = torch.device('cuda')
     optimizer = AdamW(params=[
@@ -213,6 +217,13 @@ if __name__ == '__main__':
             outputs = model(**inputs)
             loss = outputs.loss
             loss.backward()
+            # attack
+            fgm.attack()
+            output_attck = model(**inputs)
+            loss_attack = output_attck.loss
+            loss_attack.backward()
+            fgm.restore()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), config.max_grad_norm)
             optimizer.step()
             lr_scheduler.step()
             optimizer.zero_grad()
@@ -226,4 +237,4 @@ if __name__ == '__main__':
                         'valid loss': valid_metrics['loss'],
                         'custom_step': step})
                 # print('valid metrics : {}'.format(valid_metrics))
-    torch.save(model.state_dict(), '/data/gehl/data/playground/models/ussp_exp040301.pth')
+    torch.save(model.state_dict(), '/data/gehl/data/playground/models/{}'.format(config.model_name))
