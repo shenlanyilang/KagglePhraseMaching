@@ -24,6 +24,8 @@ class FGM:
                 if norm and not torch.isnan(norm):
                     r_at = self.eps * param.grad / norm
                     param.data.add_(r_at)
+                else:
+                    print('norm is torch nan')
 
     def restore(self, emb_name='word_embeddings'):
         for name, para in self.model.named_parameters():

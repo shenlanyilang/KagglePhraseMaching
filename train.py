@@ -19,21 +19,24 @@ logging.getLogger().setLevel(logging.ERROR)
 from attack_train_model import FGM
 import wandb
 import copy
+from loss_utils import ShrinkageLoss
 
 
-wandb.init(project='my-project', name='exp040501')
+wandb.init(project='my-project', name='exp040602')
 wandb.watch_called = False
 config = wandb.config
 config.batch_size = 16
 config.valid_batch_size = 8
-config.epochs = 5
+config.epochs = 7
 config.lr = 2e-5
 config.max_grad_norm = 1.0
 config.classifier_lr = 2e-5
 config.seed = 200
 config.log_interval = 10
 config.eval_steps = 100
-config.model_name = 'usspm040501.pth'
+config.shrinkage_a = 10
+config.shrinkage_c = 0.2
+config.model_name = 'usspm040602.pth'
 
 data_dir = '/data/gehl/data/playground'
 
@@ -108,6 +111,26 @@ def get_preds_labels(model, dataloader):
         preds = np.append(preds, logits.flatten().cpu().numpy())
         labels = np.append(labels, batch['labels'].cpu().numpy())
     return labels, preds, loss / len(dataloader)
+
+def get_preds_labels_v2(model, loss_func, dataloader):
+    model.eval()
+    device = model.device
+    preds = np.array([])
+    labels = np.array([])
+    loss = 0
+    for batch in dataloader:
+        inputs = {k:v.to(device) for k,v in batch.items() if k != 'labels'}
+        labels_inputs = {k:v.to(device) for k, v in batch.items() if k == 'labels'}
+        with torch.no_grad():
+            outputs = model(**inputs)
+        logits = outputs.logits
+        batch_loss = loss_func(logits, labels_inputs['labels'])
+        loss += batch_loss.item()
+        # pred_labels = torch.argmax(logits, dim=1).cpu().numpy()
+        preds = np.append(preds, logits.flatten().cpu().numpy())
+        labels = np.append(labels, batch['labels'].cpu().numpy())
+    avg_loss = loss / len(dataloader)
+    return labels, preds, avg_loss
     
 def get_valid_result_v3(model, dataloader, dataloader_reverse):
     labels, preds, loss = get_preds_labels(model, dataloader)
@@ -118,8 +141,17 @@ def get_valid_result_v3(model, dataloader, dataloader_reverse):
     avg_loss = (loss + loss_reverse) / 2
     # metrics = compute_metrics(preds, labels)
     return {'pearsonr correlation': pear_score, 'loss': avg_loss}
-    
 
+def get_valid_result_v4(model, loss_func, dataloader, dataloader_reverse):
+    labels, preds, loss = get_preds_labels_v2(model, loss_func, dataloader)
+    labels_reverse, preds_reverse, loss_reverse = get_preds_labels_v2(model, loss_func, dataloader_reverse)
+    assert all(labels == labels_reverse)
+    preds_combine = (preds + preds_reverse) / 2
+    pear_score = pearsonr(preds_combine, labels)[0]
+    avg_loss = (loss + loss_reverse) / 2
+    # metrics = compute_metrics(preds, labels)
+    return {'pearsonr correlation': pear_score, 'loss': avg_loss}
+    
 def get_valid_result(model, dataloader):
     model.eval()
     device = model.device
@@ -206,21 +238,28 @@ if __name__ == '__main__':
     total_steps = len(train_dataloader) * config.epochs
 
     model.to(device)
+    shrinkage_loss = ShrinkageLoss(config.shrinkage_a, config.shrinkage_c)
     step = 0
     # pgbar = tqdm(total=total_steps, desc='train loss:')
     for epo in range(config.epochs):
         for batch in train_dataloader:
             model.train()
-            inputs = {k:v.to(device) for k,v in batch.items()}
+            inputs = {k:v.to(device) for k,v in batch.items() if k != 'labels'}
+            labels = {k:v.to(device) for k,v in batch.items() if k == 'labels'}
     #         print(inputs)
     #         break
             outputs = model(**inputs)
-            loss = outputs.loss
+            logits = outputs.logits
+            
+            loss = shrinkage_loss(logits, labels['labels'])
+            # loss = outputs.loss
             loss.backward()
             # attack
             fgm.attack()
             output_attck = model(**inputs)
-            loss_attack = output_attck.loss
+            logits_attack = output_attck.logits
+            # loss_attack = output_attck.loss
+            loss_attack = shrinkage_loss(logits_attack, labels['labels'])
             loss_attack.backward()
             fgm.restore()
             torch.nn.utils.clip_grad_norm_(model.parameters(), config.max_grad_norm)
@@ -232,9 +271,10 @@ if __name__ == '__main__':
                 wandb.log({'train loss': loss.item(),
                            'custom_step': step})
             if step % config.eval_steps == 0:
-                valid_metrics = get_valid_result_v3(model, valid_dataloader, valid_dataloader_reverse)
+                valid_metrics = get_valid_result_v4(model, shrinkage_loss, valid_dataloader, valid_dataloader_reverse)
                 wandb.log({'valid pearsonr': valid_metrics['pearsonr correlation'],
                         'valid loss': valid_metrics['loss'],
                         'custom_step': step})
                 # print('valid metrics : {}'.format(valid_metrics))
+        wandb.log({'epoch': epo+1})
     torch.save(model.state_dict(), '/data/gehl/data/playground/models/{}'.format(config.model_name))
